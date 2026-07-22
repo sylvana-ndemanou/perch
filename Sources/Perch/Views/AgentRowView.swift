@@ -8,41 +8,52 @@ struct AgentRowView: View {
     @State private var message = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: agent.kind.symbolName)
-                    .foregroundStyle(.secondary)
-                Text(agent.name)
-                    .font(.system(.body, design: .rounded))
-                    .fontWeight(.medium)
-                Spacer()
-                StatusBadge(state: agent.state)
-            }
+        HStack(spacing: 0) {
+            // A thin per-kind accent bar so a Claude Code row and a Cursor
+            // row read as visually distinct at a glance, before you even
+            // read the icon or name.
+            RoundedRectangle(cornerRadius: 2)
+                .fill(agent.kind.accentColor)
+                .frame(width: 3)
+                .padding(.vertical, 2)
 
-            if let task = agent.currentTask {
-                Text(task)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: agent.kind.symbolName)
+                        .foregroundStyle(agent.kind.accentColor)
+                    Text(agent.name)
+                        .font(.system(.body, design: .rounded))
+                        .fontWeight(.medium)
+                    Spacer()
+                    StatusBadge(state: agent.state)
+                }
 
-            if let progress = agent.progress, agent.state == .working {
-                ProgressView(value: progress)
-                    .progressViewStyle(.linear)
-            }
+                if let task = agent.currentTask {
+                    Text(task)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
 
-            if let request = agent.pendingRequest {
-                Text(request)
-                    .font(.callout)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.orange.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
+                if let progress = agent.progress, agent.state == .working {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .tint(agent.kind.accentColor)
+                }
 
-            actions
+                if let request = agent.pendingRequest {
+                    Text(request)
+                        .font(.callout)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.orange.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+
+                actions
+            }
+            .padding(10)
         }
-        .padding(10)
         .background(Color.primary.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
@@ -61,15 +72,17 @@ struct AgentRowView: View {
             }
         }
 
-        HStack(spacing: 6) {
-            TextField("Message…", text: $message)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(send)
-            Button(action: send) {
-                Image(systemName: AgentAction.sendMessage("").symbolName)
+        if agent.kind.supportsSendMessage {
+            HStack(spacing: 6) {
+                TextField("Message…", text: $message)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(send)
+                Button(action: send) {
+                    Image(systemName: AgentAction.sendMessage("").symbolName)
+                }
+                .buttonStyle(.borderless)
+                .disabled(message.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            .buttonStyle(.borderless)
-            .disabled(message.trimmingCharacters(in: .whitespaces).isEmpty)
         }
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// The kind of tool an agent is running under. `.custom` covers any agent the
 /// user wires up beyond the built-in Claude Code and Cursor providers.
@@ -13,6 +14,28 @@ enum AgentKind: String, Codable, Hashable {
         case .claudeCode: return "sparkles"
         case .cursor: return "cursorarrow.rays"
         case .custom: return "cpu"
+        }
+    }
+
+    /// Accent color used throughout the row (icon, left edge, badges) so
+    /// Claude Code and Cursor agents read as visually distinct at a glance.
+    var accentColor: Color {
+        switch self {
+        case .claudeCode: return Color(red: 0.82, green: 0.47, blue: 0.31) // Claude's warm terracotta
+        case .cursor: return Color(red: 0.35, green: 0.55, blue: 1.0)       // Cursor's blue
+        case .custom: return .secondary
+        }
+    }
+
+    /// Whether this provider currently has a real channel for `.sendMessage`.
+    /// Claude Code doesn't — injecting a message into an already-running
+    /// terminal session isn't possible via hooks (see `ClaudeCodeProvider`'s
+    /// doc comment) — so the message field is hidden rather than shown and
+    /// silently doing nothing.
+    var supportsSendMessage: Bool {
+        switch self {
+        case .claudeCode: return false
+        case .cursor, .custom: return true
         }
     }
 }
