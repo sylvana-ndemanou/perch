@@ -24,12 +24,14 @@ in spirit but needs grounding:
 - **The three legs are not executed atomically.** Between order 1 and
   order 3 the market can move and erase the edge, or turn it into a loss.
   `src/executor.py` documents this explicitly.
-- Real-time means **WebSocket, not 1-second polling.** Binance's combined
-  `bookTicker` stream pushes a message on every best-bid/ask change, which
-  is both faster and lighter than issuing 51 REST calls per second (which
-  would also burn through Binance's REST request-weight limits). "Synced
-  every second" in the original brief is implemented here as "synced
-  continuously, event-driven," which is strictly better.
+- Market data comes from Binance's REST `bookTicker` endpoint by default,
+  polled once per second — **one HTTP call returns all symbols' best
+  bid/ask at once**, so 51 markets cost exactly 1 request/interval, not
+  51. This runs over plain HTTPS/443, which passes through far more
+  corporate networks and proxies than the alternative. A true push-based
+  WebSocket feed (`src/binance_ws.py`, port 9443) is also included and
+  gives lower latency where that port/protocol isn't blocked — pass
+  `--feed ws` to use it. See "Feed options" below.
 
 If you want guaranteed, hands-off profit, this isn't that — no legitimate
 retail bot is. What this gives you is a correct, tested, safely-gated
@@ -39,7 +41,7 @@ account deliberately.
 ## Architecture
 
 ```
-Binance combined WS stream (51 symbols' bookTicker)
+Feed: rest (default) | ws | mock  --  51 symbols' bookTicker
         |
         v
 MarketDataStore (thread-safe best bid/ask cache)
@@ -81,8 +83,38 @@ python main.py
 python main.py --live --i-understand-the-risk
 ```
 
-Stop with Ctrl+C; the bot shuts down the WebSocket feed and scan loop
-cleanly on SIGINT/SIGTERM.
+Stop with Ctrl+C; the bot shuts down the feed and scan loop cleanly on
+SIGINT/SIGTERM.
+
+## Feed options
+
+`--feed {rest,ws,mock}` (or `feed.type` in `config.yaml`):
+
+- **rest** (default): polls `GET api.binance.com/api/v3/ticker/bookTicker`
+  every `feed.poll_interval_seconds`. Plain HTTPS/443, one request per
+  interval for all 51 symbols. Works anywhere ordinary HTTPS works.
+- **ws**: subscribes to Binance's combined bookTicker WebSocket
+  (`stream.binance.com:9443`) for genuine push/sub-second updates. Faster,
+  but some networks only allow standard HTTPS and block WebSocket
+  upgrades or non-443 ports outright — if it hangs on "Waiting for
+  initial market data" with no errors, that's usually why; try `rest`.
+- **mock**: generates a synthetic in-process feed (random walk + injected
+  triangular mispricings every ~8s) with **zero network calls**. Useful
+  to validate the bot's own logic (detection, risk limits, cooldown,
+  execution) offline, or in a network-restricted sandbox, before ever
+  pointing it at a real feed or real funds:
+  ```bash
+  python main.py --feed mock
+  ```
+  Every line it logs is prefixed by a warning that the data is synthetic
+  — treat the PnL numbers as a logic smoke test, not a backtest.
+
+If you're behind a restrictive proxy (locked-down CI runner, some
+corporate networks, some sandboxed cloud dev environments) and `rest`
+still can't reach `api.binance.com`, that's a network/firewall policy
+decision outside this bot's control — check with whoever manages that
+network's egress allowlist, or run the bot from a machine/environment
+that isn't behind it.
 
 ## Safety mechanisms
 
@@ -96,6 +128,10 @@ cleanly on SIGINT/SIGTERM.
   money is involved.
 - `min_profit_pct` should be set comfortably above your real fee rate to
   leave margin for slippage between the three (non-atomic) legs.
+- A per-triangle-direction cooldown (`risk.cooldown_seconds`, default 5s)
+  stops the bot from re-firing on the exact same lasting mispricing every
+  scan tick (every 100ms) — without it, one long-lived opportunity alone
+  would exhaust the whole hourly trade budget in a couple of seconds.
 
 ## Tests
 

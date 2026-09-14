@@ -51,6 +51,22 @@ risk:
   max_trade_usdt: 50.0        # capital committed per triangular trade
   daily_loss_limit_usdt: 25.0 # bot halts new trades once breached
   max_trades_per_hour: 20
+  cooldown_seconds: 5.0       # min time before re-trading the same triangle+direction
 
 # How often (seconds) to log a heartbeat / stats summary.
 stats_interval_seconds: 30
+
+feed:
+  # rest: polls https://api.binance.com/api/v3/ticker/bookTicker (all
+  #       symbols in one HTTP call) every `poll_interval_seconds`. Plain
+  #       HTTPS on port 443 -- works through most corporate proxies and
+  #       firewalls. Default, and the only option verified to work from
+  #       this project's own restricted sandbox.
+  # ws:   subscribes to Binance's combined bookTicker WebSocket stream
+  #       (port 9443) for true push-based, sub-second updates. Faster,
+  #       but blocked by some networks/proxies that only allow ordinary
+  #       HTTPS -- use where available.
+  # mock: generates a synthetic in-process feed with no network calls at
+  #       all, for offline testing of the bot's own logic.
+  type: rest
+  poll_interval_seconds: 1.0

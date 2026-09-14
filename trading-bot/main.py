@@ -5,11 +5,13 @@ import asyncio
 import logging
 import signal
 
+from src.binance_rest import run_book_ticker_poller
 from src.binance_ws import run_book_ticker_feed
 from src.bot import TradingBot
 from src.config import load_config
 from src.executor import DryRunExecutor, LiveExecutor
 from src.logger import setup_logging
+from src.mock_feed import run_mock_feed
 
 logger = logging.getLogger("trading_bot.main")
 
@@ -17,6 +19,15 @@ logger = logging.getLogger("trading_bot.main")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Binance triangular arbitrage scanner/bot")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument(
+        "--feed",
+        choices=["rest", "ws", "mock"],
+        default=None,
+        help="Market data source. Overrides feed.type in config.yaml. 'rest' (default) polls "
+        "over plain HTTPS/443 and works through most proxies/firewalls; 'ws' subscribes to "
+        "Binance's WebSocket stream for lower latency where that's not blocked; 'mock' runs a "
+        "synthetic in-process feed with zero network calls, for offline testing.",
+    )
     parser.add_argument(
         "--live",
         action="store_true",
@@ -66,7 +77,18 @@ async def main_async() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    feed_task = asyncio.create_task(run_book_ticker_feed(config.symbols, bot.store, stop_event))
+    feed_type = args.feed or config.feed_type
+    if feed_type == "ws":
+        feed_coro = run_book_ticker_feed(config.symbols, bot.store, stop_event)
+    elif feed_type == "mock":
+        feed_coro = run_mock_feed(config, bot.store, stop_event)
+    else:
+        feed_coro = run_book_ticker_poller(
+            config.symbols, bot.store, stop_event, interval_seconds=config.poll_interval_seconds
+        )
+
+    logger.info("Using '%s' market data feed", feed_type)
+    feed_task = asyncio.create_task(feed_coro)
     bot_task = asyncio.create_task(bot.run(stop_event))
 
     await stop_event.wait()

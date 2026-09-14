@@ -22,6 +22,7 @@ class TradingBot:
         self.triangles = arbitrage.build_triangles(config.altcoins, config.quote_asset, config.bridge_asset)
         self._opportunities_seen = 0
         self._trades_taken = 0
+        self._last_trade_at: dict[tuple[str, str], float] = {}
 
     async def run(self, stop_event: asyncio.Event) -> None:
         logger.info(
@@ -56,7 +57,10 @@ class TradingBot:
             return
 
         self._opportunities_seen += len(hits)
-        best = hits[0]
+
+        best = self._pick_tradable(hits)
+        if best is None:
+            return
 
         allowed, reason = self.risk.can_trade()
         if not allowed:
@@ -66,7 +70,24 @@ class TradingBot:
         amount = self.risk.trade_size(self.config.risk.max_trade_usdt)
         pnl = self.executor.execute(best, amount)
         self.risk.record_trade(pnl)
+        self._last_trade_at[(best.triangle.alt, best.direction.value)] = time.time()
         self._trades_taken += 1
+
+    def _pick_tradable(self, hits: list[arbitrage.Opportunity]) -> arbitrage.Opportunity | None:
+        """Returns the best opportunity that isn't on cooldown.
+
+        A lasting mispricing shows up on every scan tick (every 100ms), so
+        without this the bot would fire the same trade dozens of times a
+        second and burn its whole hourly trade budget on one opportunity
+        instead of spreading it across genuinely distinct ones.
+        """
+        now = time.time()
+        for opp in hits:
+            key = (opp.triangle.alt, opp.direction.value)
+            last = self._last_trade_at.get(key)
+            if last is None or now - last >= self.config.risk.cooldown_seconds:
+                return opp
+        return None
 
     def _log_stats(self) -> None:
         logger.info(
