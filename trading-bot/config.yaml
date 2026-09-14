@@ -1,0 +1,56 @@
+# Configuration for the triangular arbitrage scanner.
+#
+# Universe: for every symbol in `altcoins`, the bot watches <ALT>/USDT and
+# <ALT>/BTC, plus the single BTC/USDT market that anchors every triangle.
+# With the default list that is 25 * 2 + 1 = 51 markets tracked in real time.
+
+quote_asset: USDT
+bridge_asset: BTC
+
+altcoins:
+  - ETH
+  - BNB
+  - SOL
+  - XRP
+  - ADA
+  - DOGE
+  - AVAX
+  - DOT
+  - LINK
+  - MATIC
+  - LTC
+  - TRX
+  - ATOM
+  - UNI
+  - ETC
+  - XLM
+  - ALGO
+  - NEAR
+  - FIL
+  - APT
+  - ARB
+  - OP
+  - SUI
+  - INJ
+  - FTM
+
+# Taker fee per leg, as a fraction (0.001 = 0.10%). Binance's published
+# default spot taker fee is 0.10%; confirm your actual tier (VIP level /
+# BNB fee discount) in Account > Fees, since a stale value here will make
+# the bot chase opportunities that are not really profitable.
+taker_fee: 0.001
+
+# Minimum net profit (after fees on all 3 legs) required before the bot
+# will even log/act on an opportunity, as a fraction (0.001 = 0.10%).
+# Set well above zero to absorb slippage between detection and execution,
+# since the three legs are NOT executed atomically.
+min_profit_pct: 0.0015
+
+# Safety limits, enforced by the risk manager regardless of --live/--dry-run.
+risk:
+  max_trade_usdt: 50.0        # capital committed per triangular trade
+  daily_loss_limit_usdt: 25.0 # bot halts new trades once breached
+  max_trades_per_hour: 20
+
+# How often (seconds) to log a heartbeat / stats summary.
+stats_interval_seconds: 30
