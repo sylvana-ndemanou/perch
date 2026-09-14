@@ -3,15 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import secrets
 from contextlib import asynccontextmanager
 
+import jwt
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src import clerk_auth
 from src.binance_rest import run_book_ticker_poller
 from src.bot import TradingBot
 from src.config import load_config
@@ -29,29 +30,33 @@ ENABLE_WITHDRAWALS = os.getenv("ENABLE_WITHDRAWALS", "false").lower() == "true"
 DASHBOARD_FEED = os.getenv("DASHBOARD_FEED", "rest")
 
 app_state: dict = {}
-security = HTTPBasic(auto_error=False)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> bool:
-    """HTTP Basic auth gate for every route.
+def require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> dict:
+    """Clerk session-token gate for every route.
 
-    If DASHBOARD_USERNAME/PASSWORD aren't set, access is left open -- fine
-    for a local dry-run demo bound to 127.0.0.1, but LIVE_MODE refuses to
-    start at all without them (see lifespan below), since this dashboard
-    can move real funds and must never be reachable by an unauthenticated
-    request once that's true.
+    The frontend (static/index.html) signs the visitor in via Clerk and
+    attaches their session token as `Authorization: Bearer <token>` on
+    every API call. This verifies that token against Clerk's JWKS -- see
+    src/clerk_auth.py for why that approach (rather than Clerk's Python
+    SDK) was used.
+
+    If CLERK_JWKS_URL isn't set, access is left open -- fine for a local
+    dry-run demo bound to 127.0.0.1, but LIVE_MODE refuses to start at all
+    without it (see lifespan below), since this dashboard can move real
+    funds and must never be reachable by an unauthenticated request once
+    that's true.
     """
-    user = os.getenv("DASHBOARD_USERNAME")
-    password = os.getenv("DASHBOARD_PASSWORD")
-    if not user or not password:
-        return True
+    if not clerk_auth.clerk_configured():
+        return {}
 
-    valid = credentials is not None and secrets.compare_digest(credentials.username, user) and secrets.compare_digest(
-        credentials.password, password
-    )
-    if not valid:
-        raise HTTPException(401, "Invalid dashboard credentials", headers={"WWW-Authenticate": "Basic"})
-    return True
+    if credentials is None:
+        raise HTTPException(401, "Missing bearer token", headers={"WWW-Authenticate": "Bearer"})
+    try:
+        return clerk_auth.verify_session_token(credentials.credentials)
+    except jwt.PyJWTError as exc:
+        raise HTTPException(401, f"Invalid or expired session: {exc}", headers={"WWW-Authenticate": "Bearer"})
 
 
 @asynccontextmanager
@@ -59,10 +64,10 @@ async def lifespan(app: FastAPI):
     setup_logging()
     config = load_config()
 
-    if LIVE_MODE and not (os.getenv("DASHBOARD_USERNAME") and os.getenv("DASHBOARD_PASSWORD")):
+    if LIVE_MODE and not clerk_auth.clerk_configured():
         raise RuntimeError(
-            "LIVE_MODE=true requires DASHBOARD_USERNAME and DASHBOARD_PASSWORD to be set in .env -- "
-            "refusing to expose a real-money dashboard with no authentication."
+            "LIVE_MODE=true requires CLERK_JWKS_URL (and CLERK_ISSUER) to be set in .env -- refusing "
+            "to expose a real-money dashboard with no authentication."
         )
     if ENABLE_WITHDRAWALS and not LIVE_MODE:
         raise RuntimeError("ENABLE_WITHDRAWALS=true requires LIVE_MODE=true.")
@@ -114,7 +119,7 @@ async def lifespan(app: FastAPI):
     await asyncio.gather(feed_task, bot_task, return_exceptions=True)
 
 
-app = FastAPI(lifespan=lifespan, dependencies=[Depends(require_auth)])
+app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
@@ -123,25 +128,38 @@ async def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
+@app.get("/api/config")
+async def public_config() -> dict:
+    """Public, pre-auth: the frontend needs the publishable key before a
+    visitor can sign in, so this one route is intentionally not gated by
+    require_auth. Only ever return the *publishable* key here -- never
+    CLERK_JWKS_URL/CLERK_ISSUER or any secret.
+    """
+    return {
+        "clerk_publishable_key": os.getenv("CLERK_PUBLISHABLE_KEY", ""),
+        "auth_required": clerk_auth.clerk_configured(),
+    }
+
+
 @app.get("/api/status")
-async def status() -> dict:
+async def status(_auth: dict = Depends(require_auth)) -> dict:
     return app_state["bot"].snapshot()
 
 
 @app.post("/api/bot/pause")
-async def pause() -> dict:
+async def pause(_auth: dict = Depends(require_auth)) -> dict:
     app_state["bot"].paused = True
     return {"paused": True}
 
 
 @app.post("/api/bot/resume")
-async def resume() -> dict:
+async def resume(_auth: dict = Depends(require_auth)) -> dict:
     app_state["bot"].paused = False
     return {"paused": False}
 
 
 @app.get("/api/balances")
-async def balances() -> list[dict]:
+async def balances(_auth: dict = Depends(require_auth)) -> list[dict]:
     client = app_state.get("client")
     if client is None:
         raise HTTPException(400, "Balances are only available in LIVE_MODE")
@@ -161,7 +179,7 @@ def _withdrawals_or_403() -> WithdrawalManager:
 
 
 @app.get("/api/withdraw/whitelist")
-async def withdraw_whitelist() -> list[dict]:
+async def withdraw_whitelist(_auth: dict = Depends(require_auth)) -> list[dict]:
     manager = _withdrawals_or_403()
     return [entry.__dict__ for entry in manager.whitelist_entries()]
 
@@ -173,7 +191,7 @@ class WithdrawRequestBody(BaseModel):
 
 
 @app.post("/api/withdraw/request")
-async def withdraw_request(body: WithdrawRequestBody) -> dict:
+async def withdraw_request(body: WithdrawRequestBody, _auth: dict = Depends(require_auth)) -> dict:
     manager = _withdrawals_or_403()
     try:
         return manager.request(body.asset, body.address, body.amount)
@@ -186,7 +204,7 @@ class WithdrawConfirmBody(BaseModel):
 
 
 @app.post("/api/withdraw/confirm")
-async def withdraw_confirm(body: WithdrawConfirmBody) -> dict:
+async def withdraw_confirm(body: WithdrawConfirmBody, _auth: dict = Depends(require_auth)) -> dict:
     manager = _withdrawals_or_403()
     try:
         return await asyncio.to_thread(manager.confirm, body.confirmation_id)

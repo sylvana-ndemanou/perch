@@ -86,6 +86,46 @@ python main.py --live --i-understand-the-risk
 Stop with Ctrl+C; the bot shuts down the feed and scan loop cleanly on
 SIGINT/SIGTERM.
 
+## Testing this for real: what you need to provide
+
+This project was built and unit-tested inside a Claude Code cloud sandbox
+whose network policy blocks essentially everything except GitHub/PyPI —
+confirmed by direct tests, not assumed (`curl` to `api.binance.com`,
+`clerk.com`, and even `google.com` all fail identically with a 403 policy
+denial). That's an environment setting, not something fixable from code,
+so real end-to-end testing has to happen somewhere with normal internet
+access: your own machine, or a cloud dev environment whose network policy
+you've opened up (see Claude Code's environment/network-policy docs at
+https://code.claude.com/docs if you want the latter).
+
+To actually test this for real, you (not me) need to do the following —
+and none of these secrets should ever be pasted into a chat with me;
+put them directly in your local `.env`:
+
+1. **Clone/pull this branch locally** and `pip install -r requirements.txt`.
+2. **Binance, testnet first**: register at https://testnet.binance.vision
+   and create a testnet API key/secret (fake funds, real API behavior) —
+   put them in `.env` as `BINANCE_API_KEY`/`BINANCE_API_SECRET`, leave
+   `BINANCE_TESTNET=true`. Only move to a real Binance API key
+   (Account → API Management) once you're satisfied with testnet
+   behavior, and leave withdrawal permission OFF on that key unless
+   you're specifically testing the withdrawal flow.
+3. **Clerk**: create a free account at https://clerk.com, create an
+   Application, and copy `CLERK_PUBLISHABLE_KEY`, `CLERK_JWKS_URL`,
+   `CLERK_ISSUER` from Configure → API Keys into `.env` as shown above.
+   A dev Clerk instance allows `localhost` by default; if sign-in fails
+   with an origin error, check Clerk Dashboard → Configure → Domains.
+4. Run `python main.py --feed mock` first (no keys needed at all) to
+   confirm your local setup works the same way it was verified here.
+   Then `python main.py` (real Binance data, dry-run) before ever
+   touching `--live`.
+5. For the dashboard: `uvicorn server:app --host 127.0.0.1 --port 8000`
+   with no `.env` changes runs dry-run/open-auth, matching step 4. Add
+   Clerk credentials to require sign-in even in dry-run, if you want to
+   test that flow before going anywhere near `LIVE_MODE`.
+6. Only once all of the above looks right: `LIVE_MODE=true` against
+   Binance testnet, then — deliberately, separately — real funds.
+
 ## Feed options
 
 `--feed {rest,ws,mock}` (or `feed.type` in `config.yaml`):
@@ -130,21 +170,63 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 Open `http://127.0.0.1:8000`. By default this runs the same dry-run
 scanner as `python main.py`, with a pause/resume button.
 
-**Bind it to `127.0.0.1` only.** There is no HTTPS here and, unless you
-set dashboard credentials, no authentication — never put this on `0.0.0.0`
-or a public interface as-is. If you need remote access, put it behind a
-reverse proxy that terminates TLS and forwards HTTP Basic Auth, or use an
-SSH tunnel (`ssh -L 8000:localhost:8000 your-server`) instead of exposing
-the port directly.
+**Bind it to `127.0.0.1` only.** There is no HTTPS here — never put this
+on `0.0.0.0` or a public interface as-is. If you need remote access, put
+it behind a reverse proxy that terminates TLS, or use an SSH tunnel
+(`ssh -L 8000:localhost:8000 your-server`) instead of exposing the port
+directly.
+
+### Authentication (Clerk)
+
+The dashboard gates every API route behind a Clerk session token: the
+frontend shows Clerk's sign-in widget, and every `fetch()` call attaches
+the visitor's session token as `Authorization: Bearer <token>`
+(`static/index.html`); the backend verifies that token against Clerk's
+JWKS (`src/clerk_auth.py`) rather than trusting it blindly.
+
+**Note on how this was built**: `clerk.com` is not reachable from the
+sandbox this project was developed in (see "Feed options" above for the
+same constraint applied to Binance), so the exact current shape of
+Clerk's official Python SDK and vanilla-JS embed snippet could not be
+checked against live docs. Two choices here reflect that:
+
+- The backend verifies tokens by fetching Clerk's public JWKS directly
+  (a stable, documented, framework-agnostic pattern) instead of depending
+  on `clerk-backend-api`'s exact current method names.
+- The frontend derives Clerk's per-instance script URL by decoding your
+  publishable key (`frontendApiFromPublishableKey` in `static/index.html`)
+  rather than hardcoding a CDN path that might have moved.
+
+Both were verified end-to-end against a locally-generated fake JWKS
+(self-signed RSA key, a `python -m http.server` standing in for Clerk) —
+confirmed 401 with no token, 401 with a garbage token, 200 with a validly
+signed one — but **when you wire in your real Clerk app, cross-check the
+sign-in widget actually renders**; if Clerk changed either convention,
+that's the one spot it would show up. `tests/test_clerk_auth.py` covers
+the verification logic itself (wrong signature, expired, wrong issuer),
+independent of that frontend detail.
+
+Setup, from your Clerk Dashboard (clerk.com) → Configure → API Keys:
+
+```bash
+CLERK_PUBLISHABLE_KEY=pk_test_...          # sent to the browser, not a secret
+CLERK_JWKS_URL=https://<frontend-api>/.well-known/jwks.json
+CLERK_ISSUER=https://<frontend-api>
+```
+
+If none of these are set, the dashboard runs open/unauthenticated — fine
+for local dry-run poking on `127.0.0.1`, but `LIVE_MODE=true` refuses to
+start at all without `CLERK_JWKS_URL` set, the same way it previously
+refused to start without dashboard credentials.
 
 ### Going live and enabling withdrawals
 
 Three separate opt-ins in `.env`, each one gating the next:
 
 1. `LIVE_MODE=true` — places real orders through `LiveExecutor` instead of
-   logging. **Requires** `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` to be
-   set, or the server refuses to start at all — a dashboard that can move
-   real funds must never be reachable without authentication.
+   logging. **Requires** Clerk auth to be configured (above), or the
+   server refuses to start at all — a dashboard that can move real funds
+   must never be reachable without authentication.
 2. `ENABLE_WITHDRAWALS=true` — exposes the withdrawal endpoints.
    **Requires** `LIVE_MODE=true`.
 3. `whitelist.yaml` (copy from `whitelist.yaml.example`) — at least one
@@ -197,9 +279,10 @@ pytest tests/
 Covers the triangular arbitrage math (no false positives when the three
 rates are consistent, correct detection in both directions when they
 aren't, threshold filtering, missing market data), the per-triangle
-trade cooldown, and the withdrawal request/confirm flow (whitelist
-rejection, expiry, one-time confirmation ids) against a fake Binance
-client — no network access needed to run any of it.
+trade cooldown, the withdrawal request/confirm flow (whitelist rejection,
+expiry, one-time confirmation ids) against a fake Binance client, and
+Clerk token verification (wrong signature, expired, wrong issuer) against
+a self-signed fake JWKS — no network access needed to run any of it.
 
 ## Known limitations
 

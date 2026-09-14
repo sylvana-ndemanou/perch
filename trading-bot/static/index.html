@@ -66,10 +66,16 @@
 <body>
 
 <h1>Triangular Arbitrage Bot</h1>
+
+<div id="clerk-sign-in" hidden></div>
+
+<div id="dashboard-content" hidden>
+
 <p class="sub">
   <span id="mode-badge" class="badge">--</span>
   &nbsp;feed: <span id="feed-type">--</span>
   &nbsp;market data: <span id="market-ready">--</span>
+  &nbsp;<button id="sign-out-btn" class="secondary" hidden style="padding:2px 8px;font-size:11px">Se déconnecter</button>
 </p>
 
 <div id="live-warning" class="warn critical" style="display:none">
@@ -143,6 +149,8 @@
   </div>
 </div>
 
+</div><!-- #dashboard-content -->
+
 <script>
 const fmtPct = (x) => (x * 100).toFixed(3) + '%';
 const fmtUsd = (x) => '$' + x.toFixed(4);
@@ -152,10 +160,19 @@ const fmtUptime = (s) => {
   return `${h}h ${m}m ${sec}s`;
 };
 
-async function api(path, opts) {
-  const res = await fetch(path, opts);
+async function api(path, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  if (window.Clerk && window.Clerk.session) {
+    // Session tokens are short-lived by design; fetch a fresh one on
+    // every call rather than caching it in JS.
+    const token = await window.Clerk.session.getToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  const res = await fetch(path, { ...opts, headers });
   if (res.status === 401) {
-    alert('Authentification requise ou incorrecte pour ce tableau de bord.');
+    alert('Session expirée ou invalide, reconnectez-vous.');
+    location.reload();
     throw new Error('unauthorized');
   }
   if (!res.ok) {
@@ -306,8 +323,67 @@ document.getElementById('wd-confirm-btn').addEventListener('click', async () => 
   }
 });
 
-refreshStatus();
-setInterval(() => refreshStatus().catch(console.error), 2000);
+function boot() {
+  refreshStatus();
+  setInterval(() => refreshStatus().catch(console.error), 2000);
+}
+
+// Clerk publishable keys encode "<frontend-api-host>$" as base64 after the
+// pk_test_/pk_live_ prefix -- this is how Clerk's own script loader
+// derives its instance's domain from just the key. Verify this still
+// matches your Clerk Dashboard's own "Vanilla JS" quickstart snippet if
+// in doubt; it could not be checked against live docs while this was
+// built (see README).
+function frontendApiFromPublishableKey(pk) {
+  const b64 = pk.replace(/^pk_(test|live)_/, '');
+  return atob(b64).replace(/\$$/, '');
+}
+
+async function initClerk() {
+  const config = await fetch('/api/config').then((r) => r.json());
+
+  if (!config.auth_required) {
+    document.getElementById('dashboard-content').hidden = false;
+    boot();
+    return;
+  }
+  if (!config.clerk_publishable_key) {
+    document.body.innerHTML = '<p style="padding:20px">CLERK_PUBLISHABLE_KEY manquant côté serveur (.env).</p>';
+    return;
+  }
+
+  const frontendApi = frontendApiFromPublishableKey(config.clerk_publishable_key);
+  const script = document.createElement('script');
+  script.src = `https://${frontendApi}/npm/@clerk/clerk-js@latest/dist/clerk.browser.js`;
+  script.setAttribute('data-clerk-publishable-key', config.clerk_publishable_key);
+  script.async = true;
+  script.crossOrigin = 'anonymous';
+  script.onerror = () => {
+    document.body.innerHTML = '<p style="padding:20px">Échec du chargement du script Clerk. Vérifiez CLERK_PUBLISHABLE_KEY et votre connexion réseau.</p>';
+  };
+  script.onload = async () => {
+    await window.Clerk.load();
+
+    if (!window.Clerk.user) {
+      const mountEl = document.getElementById('clerk-sign-in');
+      mountEl.hidden = false;
+      window.Clerk.mountSignIn(mountEl);
+      window.Clerk.addListener(({ user }) => {
+        if (user) location.reload();
+      });
+      return;
+    }
+
+    document.getElementById('dashboard-content').hidden = false;
+    const signOutBtn = document.getElementById('sign-out-btn');
+    signOutBtn.hidden = false;
+    signOutBtn.addEventListener('click', () => window.Clerk.signOut(() => location.reload()));
+    boot();
+  };
+  document.head.appendChild(script);
+}
+
+initClerk();
 </script>
 </body>
 </html>
