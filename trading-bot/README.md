@@ -116,6 +116,61 @@ decision outside this bot's control — check with whoever manages that
 network's egress allowlist, or run the bot from a machine/environment
 that isn't behind it.
 
+## Dashboard (for real use, including withdrawals)
+
+`main.py` is a headless CLI. `server.py` wraps the same bot in a local web
+dashboard: live status, opportunity/trade history, account balances, and
+a manual, whitelisted withdrawal flow — what you need to actually run
+this against a real account and pull money back out.
+
+```bash
+uvicorn server:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000`. By default this runs the same dry-run
+scanner as `python main.py`, with a pause/resume button.
+
+**Bind it to `127.0.0.1` only.** There is no HTTPS here and, unless you
+set dashboard credentials, no authentication — never put this on `0.0.0.0`
+or a public interface as-is. If you need remote access, put it behind a
+reverse proxy that terminates TLS and forwards HTTP Basic Auth, or use an
+SSH tunnel (`ssh -L 8000:localhost:8000 your-server`) instead of exposing
+the port directly.
+
+### Going live and enabling withdrawals
+
+Three separate opt-ins in `.env`, each one gating the next:
+
+1. `LIVE_MODE=true` — places real orders through `LiveExecutor` instead of
+   logging. **Requires** `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` to be
+   set, or the server refuses to start at all — a dashboard that can move
+   real funds must never be reachable without authentication.
+2. `ENABLE_WITHDRAWALS=true` — exposes the withdrawal endpoints.
+   **Requires** `LIVE_MODE=true`.
+3. `whitelist.yaml` (copy from `whitelist.yaml.example`) — at least one
+   verified `{asset, address, network, label}` entry. The dashboard will
+   only ever offer withdrawal destinations listed here; it never accepts
+   a free-typed address, and it never adds one on its own.
+
+Withdrawal itself is a deliberate two-step flow, by design, because it's
+the one action here that moves funds **out** of the account irreversibly:
+
+1. `POST /api/withdraw/request` (or the dashboard form) validates the
+   asset/address pair against `whitelist.yaml` and returns a
+   `confirmation_id` valid for 120 seconds. The UI shows you the exact
+   asset, amount, address, and network before you do anything else.
+2. `POST /api/withdraw/confirm` with that id is the only call that
+   actually touches Binance (`client.withdraw(...)`). Each confirmation
+   id works once; nothing about this is scheduled or automatic — a human
+   has to click both steps, every time.
+
+This whitelist is in addition to, not instead of, Binance's own
+withdrawal address whitelist and any 2FA/email confirmation it applies —
+keep those enabled too. Also confirm your API key does **not** have
+withdrawal permission enabled unless you're actively using this feature;
+Binance's own guidance is to leave it off by default, since a leaked key
+with withdrawal rights is far more dangerous than one without.
+
 ## Safety mechanisms
 
 - Dry-run by default; `--live` alone is refused without
@@ -139,9 +194,12 @@ that isn't behind it.
 pytest tests/
 ```
 
-Covers the triangular arbitrage math: no false positives when the three
+Covers the triangular arbitrage math (no false positives when the three
 rates are consistent, correct detection in both directions when they
-aren't, threshold filtering, and behavior with missing market data.
+aren't, threshold filtering, missing market data), the per-triangle
+trade cooldown, and the withdrawal request/confirm flow (whitelist
+rejection, expiry, one-time confirmation ids) against a fake Binance
+client — no network access needed to run any of it.
 
 ## Known limitations
 

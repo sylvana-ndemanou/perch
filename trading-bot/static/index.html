@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Triangular Arbitrage Bot</title>
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #121820; --border: #232c38; --text: #e6edf3;
+    --muted: #8b98a5; --green: #3fb950; --red: #f85149; --amber: #d29922;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 20px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; }
+  .badge.dry-run { background: #1f6feb33; color: var(--accent); }
+  .badge.live { background: #f8514933; color: var(--red); }
+  .badge.paused { background: #d2992233; color: var(--amber); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .value.pos { color: var(--green); } .value.neg { color: var(--red); }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+  section h2 { font-size: 14px; margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .empty { color: var(--muted); padding: 8px 0; }
+  button {
+    background: var(--accent); color: #04101f; border: none; border-radius: 6px;
+    padding: 8px 14px; font-weight: 600; cursor: pointer; font-size: 13px;
+  }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  button.danger { background: var(--red); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  input, select {
+    background: #0d1420; border: 1px solid var(--border); color: var(--text);
+    padding: 8px; border-radius: 6px; font-size: 13px; width: 100%;
+  }
+  .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+  .field { flex: 1; min-width: 140px; }
+  .field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .warn {
+    background: #d2992222; border: 1px solid var(--amber); color: var(--amber);
+    border-radius: 6px; padding: 10px 12px; margin-bottom: 16px; font-size: 13px;
+  }
+  .warn.critical { background: #f8514922; border-color: var(--red); color: var(--red); }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: #000a; display: none;
+    align-items: center; justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; width: 360px; }
+  .modal h3 { margin-top: 0; }
+  .modal .actions { display: flex; gap: 10px; margin-top: 16px; }
+  #login-notice { display: none; }
+</style>
+</head>
+<body>
+
+<h1>Triangular Arbitrage Bot</h1>
+<p class="sub">
+  <span id="mode-badge" class="badge">--</span>
+  &nbsp;feed: <span id="feed-type">--</span>
+  &nbsp;market data: <span id="market-ready">--</span>
+</p>
+
+<div id="live-warning" class="warn critical" style="display:none">
+  Mode LIVE actif : ce tableau de bord peut placer de vrais ordres et, si les retraits sont activés,
+  transférer des fonds hors de votre compte Binance. Vérifiez toujours l'adresse affichée avant de confirmer.
+</div>
+
+<div class="grid">
+  <div class="card"><div class="label">PnL du jour</div><div class="value" id="daily-pnl">--</div></div>
+  <div class="card"><div class="label">Trades exécutés</div><div class="value" id="trades-taken">--</div></div>
+  <div class="card"><div class="label">Opportunités vues</div><div class="value" id="opps-seen">--</div></div>
+  <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">--</div></div>
+</div>
+
+<section>
+  <h2>Contrôle</h2>
+  <button id="pause-btn" class="secondary">Mettre en pause</button>
+</section>
+
+<section>
+  <h2>Dernières opportunités détectées</h2>
+  <table id="opps-table"><thead><tr><th>Heure</th><th>Alt</th><th>Sens</th><th>Profit</th></tr></thead><tbody></tbody></table>
+  <div class="empty" id="opps-empty">Aucune opportunité pour le moment.</div>
+</section>
+
+<section>
+  <h2>Historique des trades</h2>
+  <table id="trades-table"><thead><tr><th>Heure</th><th>Alt</th><th>Sens</th><th>Montant</th><th>PnL</th></tr></thead><tbody></tbody></table>
+  <div class="empty" id="trades-empty">Aucun trade pour le moment.</div>
+</section>
+
+<section id="balances-section" style="display:none">
+  <h2>Soldes du compte</h2>
+  <table id="balances-table"><thead><tr><th>Actif</th><th>Disponible</th><th>Bloqué</th></tr></thead><tbody></tbody></table>
+</section>
+
+<section id="withdraw-section" style="display:none">
+  <h2>Retirer des fonds</h2>
+  <p class="sub">
+    Seules les adresses pré-vérifiées dans <code>whitelist.yaml</code> apparaissent ici.
+    Chaque retrait exige une confirmation explicite après relecture des détails.
+  </p>
+  <div class="row">
+    <div class="field">
+      <label>Destination (whitelist)</label>
+      <select id="wd-address"></select>
+    </div>
+    <div class="field">
+      <label>Montant</label>
+      <input id="wd-amount" type="number" min="0" step="any" placeholder="0.00">
+    </div>
+    <div>
+      <button id="wd-request-btn">Demander le retrait</button>
+    </div>
+  </div>
+</section>
+
+<div class="modal-backdrop" id="wd-modal">
+  <div class="modal">
+    <h3>Confirmer le retrait</h3>
+    <p>Vérifiez chaque champ avant de confirmer — cette action est irréversible.</p>
+    <p><strong>Actif :</strong> <span id="wd-confirm-asset"></span></p>
+    <p><strong>Montant :</strong> <span id="wd-confirm-amount"></span></p>
+    <p><strong>Adresse :</strong> <span id="wd-confirm-address" style="word-break: break-all"></span></p>
+    <p><strong>Réseau :</strong> <span id="wd-confirm-network"></span></p>
+    <p class="sub" id="wd-countdown"></p>
+    <div class="actions">
+      <button class="secondary" id="wd-cancel-btn">Annuler</button>
+      <button class="danger" id="wd-confirm-btn">Confirmer le retrait</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const fmtPct = (x) => (x * 100).toFixed(3) + '%';
+const fmtUsd = (x) => '$' + x.toFixed(4);
+const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString();
+const fmtUptime = (s) => {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+  return `${h}h ${m}m ${sec}s`;
+};
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (res.status === 401) {
+    alert('Authentification requise ou incorrecte pour ce tableau de bord.');
+    throw new Error('unauthorized');
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || res.statusText);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function renderTable(bodyId, emptyId, rows, renderRow) {
+  const tbody = document.getElementById(bodyId);
+  const empty = document.getElementById(emptyId);
+  tbody.innerHTML = '';
+  if (!rows.length) { empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  for (const row of rows) tbody.appendChild(renderRow(row));
+}
+
+async function refreshStatus() {
+  const s = await api('/api/status');
+
+  const badge = document.getElementById('mode-badge');
+  badge.textContent = s.paused ? 'PAUSED' : s.mode.toUpperCase();
+  badge.className = 'badge ' + (s.paused ? 'paused' : s.mode);
+  document.getElementById('feed-type').textContent = s.feed_type;
+  document.getElementById('market-ready').textContent = s.market_data_ready ? 'connectée' : 'en attente...';
+
+  document.getElementById('live-warning').style.display = s.mode === 'live' ? 'block' : 'none';
+  document.getElementById('balances-section').style.display = s.mode === 'live' ? 'block' : 'none';
+
+  const pnlEl = document.getElementById('daily-pnl');
+  pnlEl.textContent = fmtUsd(s.daily_pnl_usdt);
+  pnlEl.className = 'value ' + (s.daily_pnl_usdt >= 0 ? 'pos' : 'neg');
+  document.getElementById('trades-taken').textContent = s.trades_taken;
+  document.getElementById('opps-seen').textContent = s.opportunities_seen;
+  document.getElementById('uptime').textContent = fmtUptime(s.uptime_seconds);
+
+  document.getElementById('pause-btn').textContent = s.paused ? 'Reprendre' : 'Mettre en pause';
+
+  renderTable('opps-table', 'opps-empty', s.recent_opportunities, (o) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${fmtTime(o.detected_at)}</td><td>${o.alt}</td><td>${o.direction}</td><td>${fmtPct(o.profit_pct)}</td>`;
+    return tr;
+  });
+
+  renderTable('trades-table', 'trades-empty', s.recent_trades, (t) => {
+    const tr = document.createElement('tr');
+    const pnlClass = t.pnl_usdt >= 0 ? 'pos' : 'neg';
+    tr.innerHTML = `<td>${fmtTime(t.detected_at)}</td><td>${t.alt}</td><td>${t.direction}</td><td>${fmtUsd(t.amount_usdt)}</td><td class="${pnlClass}">${fmtUsd(t.pnl_usdt)}</td>`;
+    return tr;
+  });
+
+  if (s.mode === 'live') {
+    refreshBalances().catch(() => {});
+    refreshWhitelist().catch(() => {});
+  }
+}
+
+async function refreshBalances() {
+  const balances = await api('/api/balances');
+  renderTable('balances-table', 'balances-table', balances, (b) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${b.asset}</td><td>${b.free}</td><td>${b.locked}</td>`;
+    return tr;
+  });
+}
+
+let whitelistLoaded = false;
+async function refreshWhitelist() {
+  if (whitelistLoaded) return;
+  try {
+    const entries = await api('/api/withdraw/whitelist');
+    const select = document.getElementById('wd-address');
+    select.innerHTML = entries
+      .map((e, i) => `<option value="${i}">${e.label} -- ${e.asset} on ${e.network} (${e.address.slice(0, 10)}...)</option>`)
+      .join('');
+    select.dataset.entries = JSON.stringify(entries);
+    document.getElementById('withdraw-section').style.display = entries.length ? 'block' : 'none';
+    whitelistLoaded = true;
+  } catch (e) {
+    // Withdrawals disabled (403) -- leave the section hidden.
+  }
+}
+
+document.getElementById('pause-btn').addEventListener('click', async () => {
+  const s = await api('/api/status');
+  await api(s.paused ? '/api/bot/resume' : '/api/bot/pause', { method: 'POST' });
+  refreshStatus();
+});
+
+let pendingConfirmation = null;
+let countdownTimer = null;
+
+document.getElementById('wd-request-btn').addEventListener('click', async () => {
+  const select = document.getElementById('wd-address');
+  const entries = JSON.parse(select.dataset.entries || '[]');
+  const entry = entries[select.value];
+  const amount = parseFloat(document.getElementById('wd-amount').value);
+  if (!entry || !amount || amount <= 0) { alert('Choisissez une destination et un montant valides.'); return; }
+
+  try {
+    const pending = await api('/api/withdraw/request', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asset: entry.asset, address: entry.address, amount }),
+    });
+    pendingConfirmation = pending;
+    document.getElementById('wd-confirm-asset').textContent = pending.asset;
+    document.getElementById('wd-confirm-amount').textContent = pending.amount;
+    document.getElementById('wd-confirm-address').textContent = pending.address;
+    document.getElementById('wd-confirm-network').textContent = pending.network;
+    document.getElementById('wd-modal').classList.add('open');
+
+    let remaining = pending.expires_in_seconds;
+    const countdownEl = document.getElementById('wd-countdown');
+    countdownEl.textContent = `Expire dans ${remaining}s`;
+    clearInterval(countdownTimer);
+    countdownTimer = setInterval(() => {
+      remaining -= 1;
+      countdownEl.textContent = remaining > 0 ? `Expire dans ${remaining}s` : 'Expiré, refermez et recommencez.';
+      if (remaining <= 0) clearInterval(countdownTimer);
+    }, 1000);
+  } catch (e) {
+    alert('Échec de la demande de retrait : ' + e.message);
+  }
+});
+
+document.getElementById('wd-cancel-btn').addEventListener('click', () => {
+  document.getElementById('wd-modal').classList.remove('open');
+  clearInterval(countdownTimer);
+  pendingConfirmation = null;
+});
+
+document.getElementById('wd-confirm-btn').addEventListener('click', async () => {
+  if (!pendingConfirmation) return;
+  try {
+    await api('/api/withdraw/confirm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmation_id: pendingConfirmation.confirmation_id }),
+    });
+    alert('Retrait soumis à Binance.');
+  } catch (e) {
+    alert('Échec du retrait : ' + e.message);
+  } finally {
+    document.getElementById('wd-modal').classList.remove('open');
+    clearInterval(countdownTimer);
+    pendingConfirmation = null;
+    document.getElementById('wd-amount').value = '';
+  }
+});
+
+refreshStatus();
+setInterval(() => refreshStatus().catch(console.error), 2000);
+</script>
+</body>
+</html>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 
 from . import arbitrage
 from .config import Config
@@ -12,17 +13,25 @@ from .risk import RiskManager
 
 logger = logging.getLogger("trading_bot.bot")
 
+HISTORY_SIZE = 100
+
 
 class TradingBot:
-    def __init__(self, config: Config, executor: Executor) -> None:
+    def __init__(self, config: Config, executor: Executor, mode: str = "dry-run", feed_type: str = "rest") -> None:
         self.config = config
         self.executor = executor
+        self.mode = mode
+        self.feed_type = feed_type
         self.store = MarketDataStore()
         self.risk = RiskManager(config.risk)
         self.triangles = arbitrage.build_triangles(config.altcoins, config.quote_asset, config.bridge_asset)
         self._opportunities_seen = 0
         self._trades_taken = 0
         self._last_trade_at: dict[tuple[str, str], float] = {}
+        self._started_at = time.time()
+        self.paused = False
+        self.recent_opportunities: deque[dict] = deque(maxlen=HISTORY_SIZE)
+        self.recent_trades: deque[dict] = deque(maxlen=HISTORY_SIZE)
 
     async def run(self, stop_event: asyncio.Event) -> None:
         logger.info(
@@ -57,6 +66,11 @@ class TradingBot:
             return
 
         self._opportunities_seen += len(hits)
+        for opp in hits[:5]:
+            self.recent_opportunities.append(_opportunity_to_dict(opp))
+
+        if self.paused:
+            return
 
         best = self._pick_tradable(hits)
         if best is None:
@@ -72,6 +86,14 @@ class TradingBot:
         self.risk.record_trade(pnl)
         self._last_trade_at[(best.triangle.alt, best.direction.value)] = time.time()
         self._trades_taken += 1
+        self.recent_trades.append(
+            {
+                **_opportunity_to_dict(best),
+                "amount_usdt": amount,
+                "pnl_usdt": pnl,
+                "mode": self.mode,
+            }
+        )
 
     def _pick_tradable(self, hits: list[arbitrage.Opportunity]) -> arbitrage.Opportunity | None:
         """Returns the best opportunity that isn't on cooldown.
@@ -96,3 +118,30 @@ class TradingBot:
             self._trades_taken,
             self.risk.daily_pnl_usdt,
         )
+
+    def snapshot(self) -> dict:
+        """JSON-serializable view of the bot's live state, for the dashboard."""
+        market_ready = self.store.is_ready(self.config.symbols)
+        return {
+            "mode": self.mode,
+            "feed_type": self.feed_type,
+            "paused": self.paused,
+            "market_data_ready": market_ready,
+            "uptime_seconds": time.time() - self._started_at,
+            "opportunities_seen": self._opportunities_seen,
+            "trades_taken": self._trades_taken,
+            "daily_pnl_usdt": self.risk.daily_pnl_usdt,
+            "recent_opportunities": list(self.recent_opportunities)[-30:][::-1],
+            "recent_trades": list(self.recent_trades)[-30:][::-1],
+        }
+
+
+def _opportunity_to_dict(opp: arbitrage.Opportunity) -> dict:
+    return {
+        "alt": opp.triangle.alt,
+        "direction": opp.direction.value,
+        "profit_pct": opp.profit_pct,
+        "start_amount": opp.start_amount,
+        "end_amount": opp.end_amount,
+        "detected_at": opp.detected_at,
+    }

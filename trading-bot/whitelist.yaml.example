@@ -1,0 +1,22 @@
+# Withdrawal address whitelist for the dashboard's ENABLE_WITHDRAWALS feature.
+#
+# Copy this file to whitelist.yaml and fill in ONLY addresses you have
+# personally verified (e.g. by sending a tiny test amount first, and by
+# checking the address is also whitelisted on your Binance account under
+# Account > Security > Withdrawal Whitelist).
+#
+# This file is deliberately NOT auto-populated by any API call: an
+# address here is what the dashboard is willing to send your funds to,
+# so a wrong entry here is a wrong entry the bot will happily act on.
+#
+# - asset:   Binance coin ticker, e.g. USDT, BTC
+# - address: the destination address, exactly as verified
+# - network: Binance's network code for this coin/chain, e.g. TRX, BSC,
+#            ETH, BTC -- must match what Binance expects for `network` in
+#            /sapi/v1/capital/withdraw/apply, or the withdrawal will fail
+# - label:   a human-readable name shown in the dashboard, e.g. "My cold wallet"
+
+# - asset: USDT
+#   address: "PASTE_YOUR_VERIFIED_ADDRESS_HERE"
+#   network: TRX
+#   label: "My verified USDT wallet"
